@@ -10,12 +10,7 @@ sudo su - hadoop
 # Start all Hadoop services
 start-all.sh
 
-# Create directory for the dataset
-mkdir bdafinalassg
-cd bdafinalassg
-
 # Load the dataset from S3 bucket 
-aws s3 cp s3://bdabucket2025/cleaned_all_review.csv /home/hadoop/cleaned_all_review.csv
 aws s3 cp s3://bdagroupbucket112/cleaned_all_review.csv /home/hadoop/cleaned_all_review.csv
 
 # Put the file into Hadoop
