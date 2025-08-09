@@ -8,3 +8,132 @@ unzip asg-dataset.zip
 
 cd /home/IST3134/asg-dataset/
 
+#!/usr/bin/env python3
+import argparse
+from pyspark.sql import SparkSession, functions as F, types as T
+from pyspark.sql.window import Window
+from pyspark.ml.feature import RegexTokenizer, StopWordsRemover
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Top keywords by sentiment/firm/time (PySpark)")
+    p.add_argument("--input", required=True, help="CSV path (local, HDFS, or s3://)")
+    p.add_argument("--output", required=True, help="Output folder (parquet or csv)")
+    p.add_argument("--output-format", default="parquet", choices=["parquet", "csv"], help="Default parquet")
+    p.add_argument("--rating-col", default="rating")
+    p.add_argument("--pros-col", default="pros")
+    p.add_argument("--cons-col", default="cons")
+    p.add_argument("--firm-col", default="firm_link")
+    p.add_argument("--date-col", default="review_date")
+    p.add_argument("--pos-min", type=float, default=4.0, help="rating >= pos_min -> positive")
+    p.add_argument("--neg-max", type=float, default=2.0, help="rating <= neg_max -> negative")
+    p.add_argument("--firm-filter", default=None, help="Exact firm_link to include (optional)")
+    p.add_argument("--date-grain", default="year", choices=["all","year","month","day"])
+    p.add_argument("--min-len", type=int, default=3, help="minimum token length")
+    p.add_argument("--extra-stopwords", default="", help="comma-separated extra stopwords")
+    p.add_argument("--top-n", type=int, default=50)
+    p.add_argument("--sample-show", type=int, default=0, help="Show N sample rows instead of writing")
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+
+    spark = (
+        SparkSession.builder
+        .appName("Keyword freq by sentiment/firm/time (non-MapReduce)")
+        .getOrCreate()
+    )
+
+    # ---- Read CSV (header + inferSchema) ----
+    df = (
+        spark.read
+        .option("header", True)
+        .option("multiLine", True)
+        .option("escape", '"')
+        .csv(args.input)
+    )
+
+    # Cast rating to double
+    df = df.withColumn(args.rating_col, F.col(args.rating_col).cast("double"))
+
+    # Optional firm filter
+    if args.firm_filter:
+        df = df.filter(F.col(args.firm_col) == F.lit(args.firm_filter))
+
+    # ---- Sentiment bucket + choose text column ----
+    sentiment_col = F.when(F.col(args.rating_col) >= F.lit(args.pos_min), F.lit("positive")) \
+                     .when(F.col(args.rating_col) <= F.lit(args.neg_max), F.lit("negative")) \
+                     .otherwise(F.lit(None))
+
+    text_col = F.when(F.col(args.rating_col) >= F.lit(args.pos_min), F.col(args.pros_col)) \
+                .when(F.col(args.rating_col) <= F.lit(args.neg_max), F.col(args.cons_col)) \
+                .otherwise(F.lit(None))
+
+    df = df.select(
+        F.col(args.firm_col).alias("firm"),
+        sentiment_col.alias("sentiment"),
+        F.col(args.date_col).alias("date_raw"),
+        text_col.alias("text")
+    ).filter(F.col("sentiment").isNotNull() & F.col("text").isNotNull())
+
+    # ---- Period bucketing ----
+    # Try to parse common date shapes; fallback to extracting year
+    dt = F.to_timestamp("date_raw")
+    # If to_timestamp fails (null), try to_date directly; otherwise, keep raw
+    dt = F.coalesce(F.to_timestamp("date_raw"),
+                    F.to_timestamp(F.to_date("date_raw")),
+                    F.to_timestamp(F.concat_ws("-", F.regexp_extract("date_raw", r"(\d{4})", 1), F.lit("01"), F.lit("01"))))
+
+    if args.date_grain == "all":
+        period = F.lit("all")
+    elif args.date_grain == "year":
+        period = F.date_format(dt, "yyyy")
+    elif args.date_grain == "month":
+        period = F.date_format(dt, "yyyy-MM")
+    else:  # day
+        period = F.date_format(dt, "yyyy-MM-dd")
+
+    df = df.withColumn("period", period)
+
+    # ---- Tokenization + stopwords ----
+    # Tokens: letters, allow - and '
+    tokenizer = RegexTokenizer(inputCol="text", outputCol="tokens_raw",
+                               pattern=r"[A-Za-z][A-Za-z\-']+", gaps=False, toLowercase=True)
+
+    df_tok = tokenizer.transform(df)
+
+    # Stopwords
+    remover = StopWordsRemover(inputCol="tokens_raw", outputCol="tokens_stop")
+    if args.extra_stopwords.strip():
+        extra = [w.strip().lower() for w in args.extra_stopwords.split(",") if w.strip()]
+        remover = remover.setStopWords(remover.getStopWords() + extra)
+
+    df_tok = remover.transform(df_tok)
+
+    # Filter by min length
+    df_tok = df_tok.withColumn(
+        "tokens",
+        F.expr(f"filter(tokens_stop, x -> length(x) >= {args.min_len})")
+    )
+
+    # ---- Count ----
+    words = df_tok.select("firm", "sentiment", "period", F.explode("tokens").alias("word"))
+    counts = words.groupBy("firm", "sentiment", "period", "word").agg(F.count("*").alias("cnt"))
+
+    # ---- Top-N per (firm,sentiment,period) ----
+    w = Window.partitionBy("firm", "sentiment", "period").orderBy(F.desc("cnt"), F.asc("word"))
+    topn = counts.withColumn("rn", F.row_number().over(w)).filter(F.col("rn") <= args.top_n) \
+                 .select("firm", "sentiment", "period", "word", "cnt")
+
+    if args.sample_show and args.sample_show > 0:
+        topn.show(args.sample_show, truncate=False)
+    else:
+        if args.output_format == "parquet":
+            topn.write.mode("overwrite").parquet(args.output)
+        else:
+            # coalesce to a few files to avoid too many small files
+            topn.coalesce(1).write.mode("overwrite").option("header", True).csv(args.output)
+
+    spark.stop()
+
+if _name_ == "_main_":
+    main()
