@@ -1,0 +1,10 @@
+sudo su - hadoop
+
+cd IST3134/
+
+wget https://github.com/KoldaOng/IST3134/raw/main/asg-dataset.zip
+
+unzip asg-dataset.zip
+
+cd /home/IST3134/asg-dataset/
+
