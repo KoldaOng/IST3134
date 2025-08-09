@@ -2,11 +2,8 @@ sudo su - hadoop
 
 cd IST3134/
 
-wget https://github.com/KoldaOng/IST3134/raw/main/asg-dataset.zip
+/*se call dataset*/
 
-unzip asg-dataset.zip
-
-cd /home/IST3134/asg-dataset/
 
 nano analysis.py
 
