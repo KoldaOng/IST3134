@@ -29,73 +29,49 @@ nano mapper.py
 import sys, csv, os, re
 from datetime import datetime
 
-# ---------- Config (override with environment variables) ----------
 RATING_COL = os.getenv("RATING_COL", "rating")
 PROS_COL   = os.getenv("PROS_COL",   "pros")
 CONS_COL   = os.getenv("CONS_COL",   "cons")
-FIRM_COL   = os.getenv("FIRM_COL",   "firm_link")
-DATE_COL   = os.getenv("DATE_COL",   "review_date")  # ISO date or yyyy-mm-dd; if absent, emits "all"
+DATE_COL   = os.getenv("DATE_COL",   "review_date")
 
-# Sentiment thresholds
-POS_MIN = float(os.getenv("POS_MIN", "4"))   # rating >= POS_MIN -> positive
-NEG_MAX = float(os.getenv("NEG_MAX", "2"))   # rating <= NEG_MAX -> negative
+POS_MIN = float(os.getenv("POS_MIN", "4"))
+NEG_MAX = float(os.getenv("NEG_MAX", "2"))
+DATE_GRAIN = os.getenv("DATE_GRAIN", "year")  # year|month|day|all
 
-# Optional filters
-FIRM_FILTER = os.getenv("FIRM_FILTER")       # only include rows whose firm_link equals this (exact match); if unset, include all
-DATE_GRAIN  = os.getenv("DATE_GRAIN", "year")  # "year" | "month" | "day" | "all"
-
-# Tokenization / stopwords
 MIN_LEN = int(os.getenv("MIN_LEN", "3"))
-STOPWORDS = set((os.getenv("STOPWORDS", "")).lower().split(",")) if os.getenv("STOPWORDS") else {
-    # a small, built-in English stopword list; extend via STOPWORDS env if needed
+STOPWORDS = {
     "the","and","for","are","with","that","this","was","were","but","not","you","your",
-    "their","they","our","from","have","has","had","its","its","it","on","in","to","of",
+    "their","they","our","from","have","has","had","its","it","on","in","to","of",
     "as","is","be","by","an","or","at","we","us","i","me","my","so","if","can","could",
     "would","should","very","more","most","also","too","than","then","when","while","into",
-    "over","out","up","down","across","about","after","before","again","just", "there", "any"
+    "over","out","up","down","across","about","after","before","again","just","there","any",
+    "yes","no","a","which","will","he","she","them","been", "all", "get", "do"
 }
+TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z\-']+")
 
-TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z\-']+")
-
-def normalize_word(w: str) -> str:
-    w = w.lower().strip("'-")
-    return w
-
-def iter_words(text: str):
-    if not text:
-        return
+def iter_words(text):
+    if not text: return
     for m in TOKEN_RE.finditer(text):
-        w = normalize_word(m.group())
+        w = m.group().lower().strip("'-")
         if len(w) >= MIN_LEN and w not in STOPWORDS:
             yield w
 
-def period_from_date(s: str) -> str:
-    if not s or DATE_GRAIN == "all":
-        return "all"
-    s = s.strip()
-    # Try multiple formats
-    dt = None
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%m/%d/%Y", "%Y-%m", "%Y/%m", "%Y"):
+def period_from_date(s):
+    if not s or DATE_GRAIN == "all": return "all"
+    for fmt in ("%Y-%m-%d","%d-%m-%Y","%Y/%m/%d","%m/%d/%Y","%Y-%m","%Y/%m","%Y"):
         try:
+            from datetime import datetime
             dt = datetime.strptime(s[:len(fmt)], fmt)
             break
-        except Exception:
-            continue
+        except: dt = None
     if dt is None:
-        # try to extract year
-        import re as _re
-        m = _re.search(r"(\d{4})", s)
-        if m:
-            return m.group(1)
-        return "all"
-    if DATE_GRAIN == "year":
-        return f"{dt.year:04d}"
-    elif DATE_GRAIN == "month":
-        return f"{dt.year:04d}-{dt.month:02d}"
-    elif DATE_GRAIN == "day":
-        return f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
-    else:
-        return "all"
+        import re
+        m = re.search(r"(\d{4})", s)
+        return m.group(1) if m else "all"
+    if DATE_GRAIN == "year":  return f"{dt.year:04d}"
+    if DATE_GRAIN == "month": return f"{dt.year:04d}-{dt.month:02d}"
+    if DATE_GRAIN == "day":   return f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
+    return "all"
 
 def emit(key_parts, value):
     sys.stdout.write("\t".join(key_parts) + "\t" + str(value) + "\n")
@@ -103,42 +79,25 @@ def emit(key_parts, value):
 def main():
     reader = csv.DictReader(sys.stdin)
     for row in reader:
-        try:
-            firm = (row.get(FIRM_COL) or "").strip()
-            if FIRM_FILTER and firm != FIRM_FILTER:
-                continue
+        r = (row.get(RATING_COL) or "").strip()
+        if not r: continue
+        try: rating = float(r)
+        except: continue
 
-            rating_str = (row.get(RATING_COL) or "").strip()
-            # skip rows with no rating
-            if not rating_str:
-                continue
-            try:
-                rating = float(rating_str)
-            except ValueError:
-                continue
-
-            # Determine sentiment bucket & which text to use
-            if rating >= POS_MIN:
-                bucket = "positive"
-                text = row.get(PROS_COL) or ""
-            elif rating <= NEG_MAX:
-                bucket = "negative"
-                text = row.get(CONS_COL) or ""
-            else:
-                continue  # neutral range; skip
-
-            period = period_from_date(row.get(DATE_COL, ""))
-
-            for tok in iter_words(text):
-                # Key: firm | bucket | period | token
-                emit([firm or "unknown_firm", bucket, period, tok], 1)
-
-        except Exception:
-            # fail-safe: skip bad rows
+        if rating >= POS_MIN:
+            bucket, text = "positive", row.get(PROS_COL) or ""
+        elif rating <= NEG_MAX:
+            bucket, text = "negative", row.get(CONS_COL) or ""
+        else:
             continue
 
+        period = period_from_date(row.get(DATE_COL, "") or "")
+        for tok in iter_words(text):
+            # Key: sentiment | period | token
+            emit([bucket, period, tok], 1)
+
 if __name__ == "__main__":
-    main()
+    main()
 
 ------------------------------End of mapper script---------------------------------------------------
 
@@ -149,63 +108,53 @@ nano reducer.py
 #!/usr/bin/env python3
 import sys, os, heapq
 
-# Output top-N words per (firm, sentiment, period) group.
 TOP_N = int(os.getenv("TOP_N", "50"))
 
 def flush_group(group_key, word_counts):
-    """group_key: (firm, bucket, period), word_counts: dict[token]=count"""
-    if group_key is None:
-        return
-    firm, bucket, period = group_key
-    # Top-N by count desc then token asc
-    items = [(-cnt, tok) for tok, cnt in word_counts.items()]
-    heapq.heapify(items)
+    if group_key is None: return
+    bucket, period = group_key
+    # top-N
+    heap = [(-c, w) for w, c in word_counts.items()]
+    heapq.heapify(heap)
     n = 0
-    while items and n < TOP_N:
-        negcnt, tok = heapq.heappop(items)
-        cnt = -negcnt
-        # Output: firm\tbucket\tperiod\tword\tcount
-        sys.stdout.write(f"{firm}\t{bucket}\t{period}\t{tok}\t{cnt}\n")
+    while heap and n < TOP_N:
+        cnt, word = heapq.heappop(heap)
+        cnt = -cnt
+        # Output: sentiment\tperiod\tword\tcount
+        sys.stdout.write(f"{bucket}\t{period}\t{word}\t{cnt}\n")
         n += 1
 
 def main():
-    current_group = None  # (firm,bucket,period)
-    current_token = None
+    current_group = None
     word_counts = {}
 
     for line in sys.stdin:
         parts = line.rstrip("\n").split("\t")
-        if len(parts) < 5:
-            # Expect: firm, bucket, period, token, count
-            # Some mappers might collapse identical keys; handle both layouts
-            if len(parts) == 4:
-                # No explicit count -> assume 1
-                parts.append("1")
-            else:
-                continue
-        firm, bucket, period, token, count_str = parts[0], parts[1], parts[2], parts[3], parts[4]
-        try:
-            count = int(count_str)
-        except:
+        if len(parts) == 4:
+            bucket, period, token, count_str = parts
+        elif len(parts) == 3:
+            # mapper omitted count; assume 1
+            bucket, period, token = parts
+            count_str = "1"
+        else:
             continue
 
-        group_key = (firm, bucket, period)
+        try: count = int(count_str)
+        except: continue
 
-        if current_group != group_key:
-            # Flush previous
+        g = (bucket, period)
+        if g != current_group:
             flush_group(current_group, word_counts)
             word_counts.clear()
-            current_group = group_key
-
-        # Aggregate token
+            current_group = g
         word_counts[token] = word_counts.get(token, 0) + count
 
-    # Flush last
     flush_group(current_group, word_counts)
 
 if __name__ == "__main__":
-    main()
+    main()
 
 ------------------------------End of reducer script---------------------------------------------------
 
-cat cleaned_all_review.csv 
+# Run MapReduce locally on 'cleaned_all_review.csv' and display top 20 results (10 positive, 10 negative)
+cat cleaned_all_review.csv | python3 mapper.py | sort | python3 reducer.py | head -n 20
