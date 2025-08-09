@@ -1,0 +1,13 @@
+# Update all available packages
+sudo apt update
+
+# Install AWS Command Line Interface (CLI)
+sudo apt install awscli
+
+# Go into hadoop server
+sudo su - hadoop
+
+# Start all Hadoop services
+start-all.sh
+
+
