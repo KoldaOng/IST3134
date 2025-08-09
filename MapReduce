@@ -103,52 +103,64 @@ nano reducer.py
 #!/usr/bin/env python3
 import sys, os, heapq
 
-TOP_N = int(os.getenv("TOP_N", "50"))
+# How many words per (sentiment, period)
+TOP_N = int(os.getenv("TOP_N", "10"))
 
 def flush_group(group_key, word_counts):
-    if group_key is None: return
-    bucket, period = group_key
-    # top-N
-    heap = [(-c, w) for w, c in word_counts.items()]
+    """Emit top-N for the finished (sentiment, period) group."""
+    if group_key is None:
+        return
+    sentiment, period = group_key
+
+    # Max-heap by negative count, then token asc for tie-break
+    heap = [(-cnt, tok) for tok, cnt in word_counts.items()]
     heapq.heapify(heap)
+
     n = 0
     while heap and n < TOP_N:
-        cnt, word = heapq.heappop(heap)
-        cnt = -cnt
-        # Output: sentiment\tperiod\tword\tcount
-        sys.stdout.write(f"{bucket}\t{period}\t{word}\t{cnt}\n")
+        negcnt, tok = heapq.heappop(heap)
+        cnt = -negcnt
+        # Output: sentiment \t period \t word \t count
+        sys.stdout.write(f"{sentiment}\t{period}\t{tok}\t{cnt}\n")
         n += 1
 
 def main():
-    current_group = None
-    word_counts = {}
+    current_group = None        # (sentiment, period)
+    word_counts = {}            # token -> count
 
     for line in sys.stdin:
         parts = line.rstrip("\n").split("\t")
+        # Expect mapper to output: sentiment, period, token, count
         if len(parts) == 4:
-            bucket, period, token, count_str = parts
+            sentiment, period, token, count_str = parts
         elif len(parts) == 3:
-            # mapper omitted count; assume 1
-            bucket, period, token = parts
+            # If mapper didn’t include a count, assume 1
+            sentiment, period, token = parts
             count_str = "1"
         else:
             continue
 
-        try: count = int(count_str)
-        except: continue
+        try:
+            count = int(count_str)
+        except:
+            continue
 
-        g = (bucket, period)
-        if g != current_group:
+        group_key = (sentiment, period)
+
+        # When the sorted key changes, flush the previous group
+        if group_key != current_group:
             flush_group(current_group, word_counts)
             word_counts.clear()
-            current_group = g
+            current_group = group_key
+
+        # Aggregate counts within the group
         word_counts[token] = word_counts.get(token, 0) + count
 
+    # Flush last group
     flush_group(current_group, word_counts)
 
 if __name__ == "__main__":
     main()
-
 ------------------------------End of reducer script---------------------------------------------------
 
 # Run MapReduce locally on 'cleaned_all_review.csv' and display top 20 results (10 positive, 10 negative)
