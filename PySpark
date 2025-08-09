@@ -1,12 +1,25 @@
+# Update all available packages
+sudo apt update
+
+# Install AWS Command Line Interface (CLI)
+sudo apt install awscli
+
+# Go into hadoop server
 sudo su - hadoop
 
-cd IST3134/
+# Start all Hadoop services
+start-all.sh
 
-/*se call dataset*/
+# Load the dataset from S3 bucket 
+aws s3 cp s3://bdabucket2025/cleaned_all_review.csv /home/hadoop/cleaned_all_review.csv
 
+# Put the file into Hadoop
+hdfs dfs -put /home/hadoop/cleaned_all_review.csv /user/hadoop/
 
+# Create PySpark script
 nano analysis.py
 
+------------------------------Start of PySpark script---------------------------------------------------
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, split, explode, lower, regexp_replace, count, lit
 
@@ -65,4 +78,7 @@ top10_each = freq_table.withColumn("rank", F.row_number().over(w)) \
 
 top10_each.show(20, truncate=False)  # 10 positive + 10 negative
 
+------------------------------End of PySpark script---------------------------------------------------
+
+# Run PySpark locally
 spark-submit analysis.py
